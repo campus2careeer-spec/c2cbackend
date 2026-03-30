@@ -144,10 +144,48 @@ def get_vacancies():
 def create_vacancy():
     try:
         data = request.json
-        response = supabase.table('vacancies').insert(data).execute()
+        # Map frontend field names → Supabase column names
+        payload = {
+            "title":       data.get("title", ""),
+            "description": data.get("desc", data.get("description", "")),
+            "type":        data.get("type", "Job Vacancy"),
+            "skills":      data.get("skills", ""),
+            "duration":    data.get("duration", ""),
+            "offerings":   data.get("offerings", ""),
+            "location":    data.get("location", ""),
+            "owner_id":    data.get("owner_id"),
+            "owner_name":  data.get("owner_name", ""),
+        }
+        response = supabase.table('vacancies').insert(payload).execute()
         return jsonify(response.data[0]), 201
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+@app.route('/api/applications/vacancy/<vacancy_id>', methods=['GET'])
+def get_vacancy_applications(vacancy_id):
+    try:
+        response = (
+            supabase.table('applications')
+            .select("*, profiles(full_name, email)")
+            .eq('vacancy_id', vacancy_id)
+            .order('created_at', desc=True)
+            .execute()
+        )
+        apps = []
+        for a in (response.data or []):
+            profile = a.get('profiles') or {}
+            apps.append({
+                "id":          a.get('id'),
+                "student_id":  a.get('student_id'),
+                "student_name": profile.get('full_name') or a.get('student_name', 'Student'),
+                "email":       profile.get('email') or a.get('email', ''),
+                "cover_letter": a.get('cover_letter', ''),
+                "status":      a.get('status', 'Pending'),
+                "created_at":  a.get('created_at', ''),
+            })
+        return jsonify(apps)
+    except Exception as e:
+        return jsonify([])
 
 @app.route('/api/applications', methods=['POST'])
 def create_application():
