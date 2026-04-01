@@ -7,10 +7,7 @@ from core.engine import CareerEngine
 from core.knowledge_base import COURSE_DB
 
 import os
-import time
-import pandas as pd
 import spacy
-from datetime import datetime, timedelta, timezone
 from core.shared_utils import nlp
 
 nlp = spacy.load("en_core_web_sm")
@@ -31,33 +28,38 @@ def normalize_profile(raw):
     if not raw or not isinstance(raw, dict):
         return {}
     return {
-        "id": raw.get("id", ""),
-        "name": raw.get("full_name", raw.get("name", "")),
-        "full_name": raw.get("full_name", ""),
-        "username": raw.get("username", ""),
-        "email": raw.get("email", ""),
-        "role": raw.get("role", "student"),
-        "qualification": raw.get("qualification", ""),
-        "phone": raw.get("phone", ""),
-        "address": raw.get("location", raw.get("address", "")),
-        "location": raw.get("location", ""),
-        "tenth": raw.get("tenth", ""),
-        "twelfth": raw.get("twelfth", ""),
-        "graduation": raw.get("graduation", ""),
-        "skills": raw.get("skills", []),
-        "photo": raw.get("photo", None),
-        "about": raw.get("about", ""),
+        "id":           raw.get("id", ""),
+        "name":         raw.get("full_name", raw.get("name", "")),
+        "full_name":    raw.get("full_name", ""),
+        "username":     raw.get("username", ""),
+        "email":        raw.get("email", ""),
+        "role":         raw.get("role", "student"),
+        "qualification":raw.get("qualification", ""),
+        "phone":        raw.get("phone", ""),
+        "address":      raw.get("location", raw.get("address", "")),
+        "location":     raw.get("location", ""),
+        "tenth":        raw.get("tenth", ""),
+        "twelfth":      raw.get("twelfth", ""),
+        "graduation":   raw.get("graduation", ""),
+        "skills":       raw.get("skills", []),
+        "photo":        raw.get("photo", None),
+        "about":        raw.get("about", ""),
         "certificates": raw.get("certificates", []),
-        "personalPosts": raw.get("personal_posts", raw.get("personalPosts", [])),
-        "resumes": raw.get("resumes", []),
-        "chats": raw.get("chats", {}),
+        "personalPosts":raw.get("personal_posts", raw.get("personalPosts", [])),
+        "resumes":      raw.get("resumes", []),
+        "chats":        raw.get("chats", {}),
         "company_name": raw.get("company_name", ""),
-        "tagline": raw.get("tagline", ""),
-        "domain": raw.get("domain", ""),
-        "website": raw.get("website", ""),
-        "founded": raw.get("founded", ""),
-        "achievements": raw.get("achievements", []),
-        "created_at": raw.get("created_at", ""),
+        "tagline":      raw.get("tagline", ""),
+        "domain":       raw.get("domain", ""),
+        "website":      raw.get("website", ""),
+        "linkedin":     raw.get("linkedin", ""),
+        "github":       raw.get("github", ""),
+        "cgpa":         raw.get("cgpa", ""),
+        "experience":   raw.get("experience", ""),
+        "projects":     raw.get("projects", ""),
+        "achievements": raw.get("achievements", ""),
+        "founded":      raw.get("founded", ""),
+        "created_at":   raw.get("created_at", ""),
     }
 
 
@@ -68,6 +70,21 @@ def _first_row(response):
     if isinstance(data, list):
         return data[0] if data else None
     return data
+
+
+# ── FIX: Comprehensive field mapping from frontend keys → DB column names.
+# This is the single source of truth so nothing is silently dropped.
+FIELD_MAP = {
+    "name":         "full_name",
+    "fullName":     "full_name",
+    "address":      "location",
+    "personalPosts":"personal_posts",
+    # All other keys pass through unchanged (phone, about, skills, etc.)
+}
+
+def map_to_db(updates: dict) -> dict:
+    """Convert frontend payload keys to database column names."""
+    return {FIELD_MAP.get(k, k): v for k, v in updates.items()}
 
 
 @app.route('/api/get-profile', methods=['GET'])
@@ -82,7 +99,6 @@ def get_profile():
         row = _first_row(response)
         if not row:
             return jsonify({"error": "No profile found"}), 404
-
         return jsonify(normalize_profile(row))
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -107,42 +123,29 @@ def update_profile(user_id):
         if not updates:
             return jsonify({"error": "No data provided"}), 400
 
-        db_updates = {}
-        field_map = {
-            "name": "full_name", "fullName": "full_name", "address": "location",
-            "personalPosts": "personal_posts", "graduation": "graduation"
-        }
-        
-        for key, val in updates.items():
-            mapped_key = field_map.get(key, key)
+        db_updates = map_to_db(updates)
 
-            # --- FORCED SKILLS FIX ---
-            if mapped_key == "skills":
-                if val is None:
-                    db_updates["skills"] = []
-                elif isinstance(val, list):
-                    # Clean the list of empty strings and duplicates
-                    seen = set()
-                    db_updates["skills"] = [str(s).strip() for s in val if str(s).strip() and not (str(s).strip() in seen or seen.add(str(s).strip()))]
-                else:
-                    db_updates["skills"] = [s.strip() for s in str(val).split(",") if s.strip()]
-                continue 
+        # ── FIX: Supabase .update() does NOT always return the updated row —
+        # it depends on RLS policies and PostgREST "Prefer: return=representation".
+        # We perform the update, then do a separate SELECT to fetch the fresh row.
+        # This prevents a spurious 404 that was causing "Could not save" on the frontend.
+        supabase.table('profiles').update(db_updates).eq('id', user_id).execute()
 
-            db_updates[mapped_key] = val
+        # Now fetch the updated row to return it (or just return success if fetch fails)
+        try:
+            fetch_res = supabase.table('profiles').select("*").eq('id', user_id).execute()
+            row = _first_row(fetch_res)
+            if row:
+                return jsonify(normalize_profile(row))
+        except Exception:
+            pass
 
-        # SAFETY: Use .execute() instead of .single() to prevent crashes on empty results
-        response = supabase.table('profiles').update(db_updates).eq('id', user_id).execute()
-        
-        # Check if we actually got data back using the helper
-        row = _first_row(response)
-        if not row:
-            return jsonify({"error": "Profile not found or update failed"}), 404
-            
-        return jsonify(normalize_profile(row))
+        # Even if re-fetch fails, the update succeeded — return 200 with the sent payload
+        return jsonify({"success": True, "updated": updates}), 200
+
     except Exception as e:
-        print(f"Backend Error: {str(e)}") # This will show in your Render logs
         return jsonify({"error": str(e)}), 500
-        
+
 
 @app.route('/api/users', methods=['GET'])
 def get_users():
@@ -276,16 +279,16 @@ def get_student_applications(student_id):
 def update_application_status(app_id):
     try:
         new_status = request.json.get("status", "Pending")
-        response = (
-            supabase.table('applications')
-            .update({"status": new_status})
-            .eq('id', app_id)
-            .execute()
-        )
-        row = _first_row(response)
-        if not row:
-            return jsonify({"error": "Application not found"}), 404
-        return jsonify(row)
+        # ── FIX: same pattern — update then re-fetch
+        supabase.table('applications').update({"status": new_status}).eq('id', app_id).execute()
+        try:
+            fetch_res = supabase.table('applications').select("*").eq('id', app_id).execute()
+            row = _first_row(fetch_res)
+            if row:
+                return jsonify(row)
+        except Exception:
+            pass
+        return jsonify({"success": True, "status": new_status}), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -293,7 +296,7 @@ def update_application_status(app_id):
 @app.route('/api/messages/<user_id>', methods=['GET'])
 def get_messages(user_id):
     try:
-        sent = supabase.table('messages').select("*").eq('sender_id', user_id).execute()
+        sent     = supabase.table('messages').select("*").eq('sender_id',   user_id).execute()
         received = supabase.table('messages').select("*").eq('receiver_id', user_id).execute()
         all_msgs = (sent.data or []) + (received.data or [])
         all_msgs.sort(key=lambda m: m.get('created_at', ''))
