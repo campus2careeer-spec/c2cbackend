@@ -13,7 +13,6 @@ import spacy
 from datetime import datetime, timedelta, timezone
 from core.shared_utils import nlp
 
-# Load spaCy model for AI analysis
 nlp = spacy.load("en_core_web_sm")
 
 load_dotenv()
@@ -21,7 +20,6 @@ load_dotenv()
 app = Flask(__name__)
 CORS(app, resources={r"/api/*": {"origins": "*"}})
 
-# ─── Supabase Configuration ────────────────────────────────────────────────────
 url = os.getenv("SUPABASE_URL")
 key = os.getenv("SUPABASE_KEY")
 supabase: Client = create_client(url, key)
@@ -29,12 +27,7 @@ supabase: Client = create_client(url, key)
 engine = CareerEngine(supabase)
 
 
-# ─── NORMALIZE HELPER ─────────────────────────────────────────────────────────
 def normalize_profile(raw):
-    """
-    Maps Supabase snake_case to frontend camelCase.
-    Accepts a dict. Returns {} if raw is falsy.
-    """
     if not raw or not isinstance(raw, dict):
         return {}
     return {
@@ -69,29 +62,16 @@ def normalize_profile(raw):
 
 
 def _first_row(response):
-    """
-    Safely extract the first row from a Supabase .execute() response.
-    Returns None if no data.
-    """
     data = response.data
     if not data:
         return None
     if isinstance(data, list):
         return data[0] if data else None
-    # .single() returns a dict directly — handle both cases
     return data
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# 1. PROFILE ENDPOINTS
-# ══════════════════════════════════════════════════════════════════════════════
-
 @app.route('/api/get-profile', methods=['GET'])
 def get_profile():
-    """
-    FIX: Replaced .single() with .execute() + list indexing to avoid
-    PostgREST 406 errors when the row doesn't exist.
-    """
     try:
         user_id = request.args.get('user_id')
         if user_id:
@@ -110,11 +90,6 @@ def get_profile():
 
 @app.route('/api/profile/<user_id>', methods=['GET'])
 def get_profile_by_id(user_id):
-    """
-    FIX: Replaced .single() with .execute() to avoid PostgREST 406.
-    .single() raises an exception if 0 rows or 2+ rows are returned.
-    .execute() always returns a list — we safely take [0].
-    """
     try:
         response = supabase.table('profiles').select("*").eq('id', user_id).execute()
         row = _first_row(response)
@@ -165,10 +140,6 @@ def get_users():
         return jsonify([])
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# 2. VACANCY & APPLICATION ENDPOINTS
-# ══════════════════════════════════════════════════════════════════════════════
-
 @app.route('/api/vacancies', methods=['GET'])
 def get_vacancies():
     try:
@@ -180,17 +151,11 @@ def get_vacancies():
 
 @app.route('/api/vacancies', methods=['POST'])
 def create_vacancy():
-    """
-    FIX: Added validation for required fields (title, owner_id) before
-    attempting the Supabase insert. Returns a clear error instead of a
-    silent 500 when owner_id is null (which violates the FK constraint).
-    """
     try:
         data = request.json
         if not data:
             return jsonify({"error": "No data provided"}), 400
 
-        # Validate required fields
         title = data.get("title", "").strip()
         if not title:
             return jsonify({"error": "title is required"}), 400
@@ -222,7 +187,6 @@ def create_vacancy():
         return jsonify(row), 201
 
     except Exception as e:
-        # Return the real error so the frontend can surface it
         return jsonify({"error": str(e)}), 500
 
 
@@ -309,10 +273,6 @@ def update_application_status(app_id):
         return jsonify({"error": str(e)}), 500
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# 3. MESSAGE ENDPOINTS
-# ══════════════════════════════════════════════════════════════════════════════
-
 @app.route('/api/messages/<user_id>', methods=['GET'])
 def get_messages(user_id):
     try:
@@ -340,10 +300,6 @@ def send_message():
         return jsonify({"error": str(e)}), 500
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# 4. JOB FEED & AI ANALYSIS
-# ══════════════════════════════════════════════════════════════════════════════
-
 @app.route('/api/all-jobs', methods=['GET'])
 def get_jobs():
     try:
@@ -364,10 +320,6 @@ def analyze():
     skills = request.json.get('skills', '')
     return jsonify(engine.recommend_by_skills(skills))
 
-
-# ══════════════════════════════════════════════════════════════════════════════
-# 5. INDUSTRIES & COURSES
-# ══════════════════════════════════════════════════════════════════════════════
 
 @app.route('/api/industries', methods=['GET'])
 def get_industries():
@@ -400,10 +352,6 @@ def get_courses():
     except Exception as e:
         return jsonify([])
 
-
-# ══════════════════════════════════════════════════════════════════════════════
-# 6. ENTRY POINT
-# ══════════════════════════════════════════════════════════════════════════════
 
 if __name__ == '__main__':
     port = int(os.getenv("PORT", 5000))
