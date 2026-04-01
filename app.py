@@ -109,23 +109,40 @@ def update_profile(user_id):
 
         db_updates = {}
         field_map = {
-            "name": "full_name",
-            "fullName": "full_name",
-            "address": "location",
-            "personalPosts": "personal_posts",
-            "graduation": "graduation",
+            "name": "full_name", "fullName": "full_name", "address": "location",
+            "personalPosts": "personal_posts", "graduation": "graduation"
         }
+        
         for key, val in updates.items():
-            db_updates[field_map.get(key, key)] = val
+            mapped_key = field_map.get(key, key)
 
+            # --- FORCED SKILLS FIX ---
+            if mapped_key == "skills":
+                if val is None:
+                    db_updates["skills"] = []
+                elif isinstance(val, list):
+                    # Clean the list of empty strings and duplicates
+                    seen = set()
+                    db_updates["skills"] = [str(s).strip() for s in val if str(s).strip() and not (str(s).strip() in seen or seen.add(str(s).strip()))]
+                else:
+                    db_updates["skills"] = [s.strip() for s in str(val).split(",") if s.strip()]
+                continue 
+
+            db_updates[mapped_key] = val
+
+        # SAFETY: Use .execute() instead of .single() to prevent crashes on empty results
         response = supabase.table('profiles').update(db_updates).eq('id', user_id).execute()
+        
+        # Check if we actually got data back using the helper
         row = _first_row(response)
         if not row:
-            return jsonify({"error": "Update failed or profile not found"}), 404
+            return jsonify({"error": "Profile not found or update failed"}), 404
+            
         return jsonify(normalize_profile(row))
     except Exception as e:
+        print(f"Backend Error: {str(e)}") # This will show in your Render logs
         return jsonify({"error": str(e)}), 500
-
+        
 
 @app.route('/api/users', methods=['GET'])
 def get_users():
