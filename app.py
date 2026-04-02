@@ -177,36 +177,6 @@ def update_profile(user_id):
         return jsonify({"error": str(e)}), 500
 
 
-@app.route('/api/profile/<user_id>', methods=['PUT'])
-def update_profile(user_id):
-    try:
-        updates = request.json
-        if not updates:
-            return jsonify({"error": "No data provided"}), 400
-
-        db_updates = map_to_db(updates)
-
-        # ── FIX: Supabase .update() does NOT always return the updated row —
-        # it depends on RLS policies and PostgREST "Prefer: return=representation".
-        # We perform the update, then do a separate SELECT to fetch the fresh row.
-        # This prevents a spurious 404 that was causing "Could not save" on the frontend.
-        supabase.table('profiles').update(db_updates).eq('id', user_id).execute()
-
-        # Now fetch the updated row to return it (or just return success if fetch fails)
-        try:
-            fetch_res = supabase.table('profiles').select("*").eq('id', user_id).execute()
-            row = _first_row(fetch_res)
-            if row:
-                return jsonify(normalize_profile(row))
-        except Exception:
-            pass
-
-        # Even if re-fetch fails, the update succeeded — return 200 with the sent payload
-        return jsonify({"success": True, "updated": updates}), 200
-
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
 
 @app.route('/api/users', methods=['GET'])
 def get_users():
