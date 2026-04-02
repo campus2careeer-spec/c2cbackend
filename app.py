@@ -81,7 +81,50 @@ FIELD_MAP = {
     "personalPosts":"personal_posts",
     # All other keys pass through unchanged (phone, about, skills, etc.)
 }
+# ── Add this near the top with your other helpers ──────────────────────────
 
+# Columns that actually exist in the `profiles` table.
+# Anything NOT in this set is silently dropped to prevent 500s from
+# unknown / giant columns being sent to PostgREST.
+ALLOWED_PROFILE_COLUMNS = {
+    "full_name", "username", "email", "phone", "location",
+    "qualification", "about", "skills", "photo", "cover_photo",
+    "tenth", "twelfth", "graduation", "cgpa", "experience",
+    "projects", "achievements", "linkedin", "github", "website",
+    "certificates", "resumes", "personal_posts",
+    "company_name", "tagline", "domain", "founded", "role",
+}
+
+def sanitize_for_db(updates: dict) -> dict:
+    """
+    1. Map frontend keys → DB column names.
+    2. Drop any key not in ALLOWED_PROFILE_COLUMNS.
+    3. Truncate individual base64 values that are suspiciously large
+       (> 900 KB) so a single bad upload never crashes the whole save.
+    """
+    mapped = map_to_db(updates)
+    clean = {}
+    for k, v in mapped.items():
+        if k not in ALLOWED_PROFILE_COLUMNS:
+            continue
+        # If it's a list of media objects, strip out giant base64 payloads
+        # (they should be stored in Supabase Storage, not in the row).
+        if isinstance(v, list):
+            safe_list = []
+            for item in v:
+                if isinstance(item, dict):
+                    item = {
+                        ik: iv for ik, iv in item.items()
+                        if not (isinstance(iv, str) and len(iv) > 900_000)
+                    }
+                safe_list.append(item)
+            v = safe_list
+        # Same guard for a plain base64 string (e.g. photo)
+        if isinstance(v, str) and len(v) > 5_000_000:
+            continue  # skip — too large for a DB column
+        clean[k] = v
+    return clean
+    
 def map_to_db(updates: dict) -> dict:
     """Convert frontend payload keys to database column names."""
     return {FIELD_MAP.get(k, k): v for k, v in updates.items()}
@@ -104,15 +147,33 @@ def get_profile():
         return jsonify({"error": str(e)}), 500
 
 
-@app.route('/api/profile/<user_id>', methods=['GET'])
-def get_profile_by_id(user_id):
+@app.route('/api/profile/<user_id>', methods=['PUT'])
+def update_profile(user_id):
     try:
-        response = supabase.table('profiles').select("*").eq('id', user_id).execute()
-        row = _first_row(response)
-        if not row:
-            return jsonify({"error": "Profile not found"}), 404
-        return jsonify(normalize_profile(row))
+        updates = request.json
+        if not updates:
+            return jsonify({"error": "No data provided"}), 400
+
+        db_updates = sanitize_for_db(updates)   # ← was map_to_db
+
+        if not db_updates:
+            return jsonify({"error": "No valid fields to update"}), 400
+
+        supabase.table('profiles').update(db_updates).eq('id', user_id).execute()
+
+        try:
+            fetch_res = supabase.table('profiles').select("*").eq('id', user_id).execute()
+            row = _first_row(fetch_res)
+            if row:
+                return jsonify(normalize_profile(row))
+        except Exception:
+            pass
+
+        return jsonify({"success": True, "updated": list(db_updates.keys())}), 200
+
     except Exception as e:
+        import traceback
+        print("update_profile error:", traceback.format_exc())   # ← shows real error in Render logs
         return jsonify({"error": str(e)}), 500
 
 
