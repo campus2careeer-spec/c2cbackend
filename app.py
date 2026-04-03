@@ -28,38 +28,39 @@ def normalize_profile(raw):
     if not raw or not isinstance(raw, dict):
         return {}
     return {
-        "id":           raw.get("id", ""),
-        "name":         raw.get("full_name", raw.get("name", "")),
-        "full_name":    raw.get("full_name", ""),
-        "username":     raw.get("username", ""),
-        "email":        raw.get("email", ""),
-        "role":         raw.get("role", "student"),
-        "qualification":raw.get("qualification", ""),
-        "phone":        raw.get("phone", ""),
-        "address":      raw.get("location", raw.get("address", "")),
-        "location":     raw.get("location", ""),
-        "tenth":        raw.get("tenth", ""),
-        "twelfth":      raw.get("twelfth", ""),
-        "graduation":   raw.get("graduation", ""),
-        "skills":       raw.get("skills", []),
-        "photo":        raw.get("photo", None),
-        "about":        raw.get("about", ""),
-        "certificates": raw.get("certificates", []),
-        "personalPosts":raw.get("personal_posts", raw.get("personalPosts", [])),
-        "resumes":      raw.get("resumes", []),
-        "chats":        raw.get("chats", {}),
-        "company_name": raw.get("company_name", ""),
-        "tagline":      raw.get("tagline", ""),
-        "domain":       raw.get("domain", ""),
-        "website":      raw.get("website", ""),
-        "linkedin":     raw.get("linkedin", ""),
-        "github":       raw.get("github", ""),
-        "cgpa":         raw.get("cgpa", ""),
-        "experience":   raw.get("experience", ""),
-        "projects":     raw.get("projects", ""),
-        "achievements": raw.get("achievements", ""),
-        "founded":      raw.get("founded", ""),
-        "created_at":   raw.get("created_at", ""),
+        "id":            raw.get("id", ""),
+        "name":          raw.get("full_name", raw.get("name", "")),
+        "full_name":     raw.get("full_name", ""),
+        "username":      raw.get("username", ""),
+        "email":         raw.get("email", ""),
+        "role":          raw.get("role", "student"),
+        "qualification": raw.get("qualification", ""),
+        "phone":         raw.get("phone", ""),
+        "address":       raw.get("location", raw.get("address", "")),
+        "location":      raw.get("location", ""),
+        "tenth":         raw.get("tenth", ""),
+        "twelfth":       raw.get("twelfth", ""),
+        "graduation":    raw.get("graduation", ""),
+        "skills":        raw.get("skills", []),
+        "photo":         raw.get("photo", None),
+        "coverPhoto":    raw.get("cover_photo", None),
+        "about":         raw.get("about", ""),
+        "certificates":  raw.get("certificates", []),
+        "personalPosts": raw.get("personal_posts", raw.get("personalPosts", [])),
+        "resumes":       raw.get("resumes", []),
+        "chats":         raw.get("chats", {}),
+        "company_name":  raw.get("company_name", ""),
+        "tagline":       raw.get("tagline", ""),
+        "domain":        raw.get("domain", ""),
+        "website":       raw.get("website", ""),
+        "linkedin":      raw.get("linkedin", ""),
+        "github":        raw.get("github", ""),
+        "cgpa":          raw.get("cgpa", ""),
+        "experience":    raw.get("experience", ""),
+        "projects":      raw.get("projects", ""),
+        "achievements":  raw.get("achievements", ""),
+        "founded":       raw.get("founded", ""),
+        "created_at":    raw.get("created_at", ""),
     }
 
 
@@ -72,20 +73,26 @@ def _first_row(response):
     return data
 
 
-# ── FIX: Comprehensive field mapping from frontend keys → DB column names.
-# This is the single source of truth so nothing is silently dropped.
+# ── COMPLETE field map: every frontend key → DB column name ──────────────────
+# FIX: Added all missing keys (github, website, projects, achievements,
+#      coverPhoto, cgpa, experience) that were silently dropped before.
 FIELD_MAP = {
-    "name":         "full_name",
-    "fullName":     "full_name",
-    "address":      "location",
-    "personalPosts":"personal_posts",
-    # All other keys pass through unchanged (phone, about, skills, etc.)
+    # Personal info
+    "name":          "full_name",
+    "fullName":      "full_name",
+    "address":       "location",
+    # Media / posts
+    "personalPosts": "personal_posts",
+    "coverPhoto":    "cover_photo",
+    # These pass through unchanged but listed for clarity:
+    # "phone", "about", "skills", "photo", "tenth", "twelfth",
+    # "graduation", "qualification", "linkedin", "github", "website",
+    # "cgpa", "experience", "projects", "achievements", "username"
 }
-# ── Add this near the top with your other helpers ──────────────────────────
 
-# Columns that actually exist in the `profiles` table.
-# Anything NOT in this set is silently dropped to prevent 500s from
-# unknown / giant columns being sent to PostgREST.
+# ── Exact columns that exist in the `profiles` table ─────────────────────────
+# Anything NOT here is dropped before the Supabase call so we never get
+# a 400/500 from unknown columns.
 ALLOWED_PROFILE_COLUMNS = {
     "full_name", "username", "email", "phone", "location",
     "qualification", "about", "skills", "photo", "cover_photo",
@@ -95,20 +102,24 @@ ALLOWED_PROFILE_COLUMNS = {
     "company_name", "tagline", "domain", "founded", "role",
 }
 
+
+def map_to_db(updates: dict) -> dict:
+    """Convert frontend payload keys → DB column names."""
+    return {FIELD_MAP.get(k, k): v for k, v in updates.items()}
+
+
 def sanitize_for_db(updates: dict) -> dict:
     """
     1. Map frontend keys → DB column names.
     2. Drop any key not in ALLOWED_PROFILE_COLUMNS.
-    3. Truncate individual base64 values that are suspiciously large
-       (> 900 KB) so a single bad upload never crashes the whole save.
+    3. Strip giant base64 payloads from list items (should be in Storage).
+    4. Skip top-level base64 strings over 5 MB.
     """
     mapped = map_to_db(updates)
     clean = {}
     for k, v in mapped.items():
         if k not in ALLOWED_PROFILE_COLUMNS:
             continue
-        # If it's a list of media objects, strip out giant base64 payloads
-        # (they should be stored in Supabase Storage, not in the row).
         if isinstance(v, list):
             safe_list = []
             for item in v:
@@ -119,16 +130,15 @@ def sanitize_for_db(updates: dict) -> dict:
                     }
                 safe_list.append(item)
             v = safe_list
-        # Same guard for a plain base64 string (e.g. photo)
         if isinstance(v, str) and len(v) > 5_000_000:
-            continue  # skip — too large for a DB column
+            continue  # too large for a DB column — skip silently
         clean[k] = v
     return clean
-    
-def map_to_db(updates: dict) -> dict:
-    """Convert frontend payload keys to database column names."""
-    return {FIELD_MAP.get(k, k): v for k, v in updates.items()}
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ROUTES
+# ─────────────────────────────────────────────────────────────────────────────
 
 @app.route('/api/get-profile', methods=['GET'])
 def get_profile():
@@ -154,28 +164,31 @@ def update_profile(user_id):
         if not updates:
             return jsonify({"error": "No data provided"}), 400
 
-        db_updates = sanitize_for_db(updates)   # ← was map_to_db
+        db_updates = sanitize_for_db(updates)
 
         if not db_updates:
             return jsonify({"error": "No valid fields to update"}), 400
 
+        # FIX: Log what we're actually saving so Render logs show the truth
+        print(f"update_profile [{user_id}] saving columns: {list(db_updates.keys())}")
+
         supabase.table('profiles').update(db_updates).eq('id', user_id).execute()
 
+        # Re-fetch and return the full updated profile
         try:
             fetch_res = supabase.table('profiles').select("*").eq('id', user_id).execute()
             row = _first_row(fetch_res)
             if row:
                 return jsonify(normalize_profile(row))
-        except Exception:
-            pass
+        except Exception as fetch_err:
+            print(f"Re-fetch after update failed: {fetch_err}")
 
         return jsonify({"success": True, "updated": list(db_updates.keys())}), 200
 
     except Exception as e:
         import traceback
-        print("update_profile error:", traceback.format_exc())   # ← shows real error in Render logs
+        print("update_profile error:", traceback.format_exc())
         return jsonify({"error": str(e)}), 500
-
 
 
 @app.route('/api/users', methods=['GET'])
@@ -213,7 +226,7 @@ def create_vacancy():
 
         owner_id = data.get("owner_id")
         if not owner_id:
-            return jsonify({"error": "owner_id is required — user may not be authenticated"}), 400
+            return jsonify({"error": "owner_id is required"}), 400
 
         desc = data.get("desc", data.get("description", "")).strip()
         if not desc:
@@ -310,7 +323,6 @@ def get_student_applications(student_id):
 def update_application_status(app_id):
     try:
         new_status = request.json.get("status", "Pending")
-        # ── FIX: same pattern — update then re-fetch
         supabase.table('applications').update({"status": new_status}).eq('id', app_id).execute()
         try:
             fetch_res = supabase.table('applications').select("*").eq('id', app_id).execute()
