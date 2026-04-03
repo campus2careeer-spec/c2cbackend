@@ -1,12 +1,10 @@
 from core.shared_utils import nlp
 
-
 def _to_str(val):
     """Safely convert any field to a plain string for text matching."""
     if isinstance(val, list):
         return ' '.join(str(v) for v in val)
     return str(val) if val else ''
-
 
 class CareerEngine:
     def __init__(self, supabase_client):
@@ -26,6 +24,7 @@ class CareerEngine:
             for job in raw_jobs:
                 title_text  = _to_str(job.get('title', ''))
                 skills_text = _to_str(job.get('skills', ''))
+                # Pre-computing docs saves massive amounts of time during requests
                 job['title_doc']  = nlp(title_text)
                 job['skills_doc'] = nlp(skills_text)
                 processed.append(job)
@@ -47,7 +46,6 @@ class CareerEngine:
             return {"error": "No jobs found in cache"}
 
         user_doc = nlp(_to_str(user_job_title))
-
         matches = []
         for job in self.jobs_data:
             try:
@@ -65,137 +63,118 @@ class CareerEngine:
 
         return sorted(matches, key=lambda x: x['accuracy'], reverse=True)[0]
 
-   def recommend_by_skills(self, user_skills_raw):
-    if not self.jobs_data:
-        return []
+    def recommend_by_skills(self, user_skills_raw):
+        """Blended algorithm: Token overlap + Spacy NLP Similarity."""
+        if not self.jobs_data:
+            return []
 
-    if isinstance(user_skills_raw, list):
-        user_skills_str = ', '.join(user_skills_raw)
-    else:
-        user_skills_str = _to_str(user_skills_raw)
-
-    user_skills_set = {
-        s.strip().lower()
-        for s in user_skills_str.replace(',', ' ').split()
-        if len(s.strip()) > 1
-    }
-    user_doc = nlp(user_skills_str)
-
-    job_matches = []
-    for job in self.jobs_data:
-        # ── Token overlap score (primary) ────────────────────────────────
-        raw_skills = job.get('skills', '')
-        if isinstance(raw_skills, list):
-            job_skill_tokens = {s.strip().lower() for s in raw_skills if s.strip()}
+        # Normalize user skills
+        if isinstance(user_skills_raw, list):
+            user_skills_str = ', '.join(user_skills_raw)
         else:
-            job_skill_tokens = {
-                s.strip().lower()
-                for s in _to_str(raw_skills).replace(',', ' ').split()
-                if s.strip()
-            }
+            user_skills_str = _to_str(user_skills_raw)
 
-        if job_skill_tokens:
-            overlap = len(user_skills_set & job_skill_tokens)
-            overlap_score = overlap / max(len(job_skill_tokens), 1)
-        else:
+        user_skills_set = {
+            s.strip().lower() 
+            for s in user_skills_str.replace(',', ' ').split() 
+            if len(s.strip()) > 1
+        }
+        user_doc = nlp(user_skills_str)
+
+        job_matches = []
+        for job in self.jobs_data:
+            # 1. Token Overlap Score
+            raw_skills = job.get('skills', '')
+            if isinstance(raw_skills, list):
+                job_skill_tokens = {s.strip().lower() for s in raw_skills if s.strip()}
+            else:
+                job_skill_tokens = {
+                    s.strip().lower() 
+                    for s in _to_str(raw_skills).replace(',', ' ').split() 
+                    if s.strip()
+                }
+
             overlap_score = 0.0
+            if job_skill_tokens:
+                overlap = len(user_skills_set & job_skill_tokens)
+                overlap_score = overlap / max(len(job_skill_tokens), 1)
 
-        # ── NLP similarity (secondary fallback weight) ───────────────────
-        try:
-            title_score  = user_doc.similarity(job['title_doc'])
-            skills_score = user_doc.similarity(job['skills_doc'])
-            nlp_score = (title_score * 0.3) + (skills_score * 0.7)
-        except Exception:
-            nlp_score = 0.0
+            # 2. NLP Similarity Fallback
+            try:
+                title_score  = user_doc.similarity(job['title_doc'])
+                skills_score = user_doc.similarity(job['skills_doc'])
+                nlp_score = (title_score * 0.3) + (skills_score * 0.7)
+            except Exception:
+                nlp_score = 0.0
 
-        # Weighted blend: overlap is more reliable for short skill lists
-        if overlap_score > 0:
-            final_score = (overlap_score * 0.75) + (nlp_score * 0.25)
-        else:
-            final_score = nlp_score * 0.4   # penalise zero-overlap jobs heavily
+            # Weighted blend
+            if overlap_score > 0:
+                final_score = (overlap_score * 0.75) + (nlp_score * 0.25)
+            else:
+                final_score = nlp_score * 0.4
 
-        job_matches.append({**job, "score": final_score})
+            job_matches.append({**job, "score": final_score})
 
-    top_jobs = sorted(job_matches, key=lambda x: x['score'], reverse=True)[:8]
+        top_jobs = sorted(job_matches, key=lambda x: x['score'], reverse=True)[:8]
 
-    results = []
-    for job in top_jobs:
-        raw_skills = job.get('skills', '')
-        if isinstance(raw_skills, list):
-            job_skills = [s.strip() for s in raw_skills if s.strip()]
-        else:
-            job_skills = [s.strip() for s in _to_str(raw_skills).split(',') if s.strip()]
+        results = []
+        for job in top_jobs:
+            # Parse skills for missing list
+            raw_skills = job.get('skills', '')
+            if isinstance(raw_skills, list):
+                job_skills_list = [s.strip() for s in raw_skills if s.strip()]
+            else:
+                job_skills_list = [s.strip() for s in _to_str(raw_skills).split(',') if s.strip()]
 
-        missing = [s for s in job_skills if s.lower() not in user_skills_set]
+            missing = [s for s in job_skills_list if s.lower() not in user_skills_set]
 
-        # ── Course matching: token overlap instead of substring only ─────
-        courses = []
-        seen_course_ids = set()
+            # Course matching
+            matched_courses = []
+            seen_ids = set()
 
-        for skill in missing[:3]:
-            skill_tokens = set(skill.lower().split())
-
-            local_hits = []
-            for c in self.courses_data:
-                blob = (
-                    _to_str(c.get('title'))  + ' ' +
-                    _to_str(c.get('skills')) + ' ' +
-                    _to_str(c.get('field'))
-                ).lower()
-                blob_tokens = set(blob.split())
-                # Match if any skill token appears in blob
-                if skill_tokens & blob_tokens:
-                    local_hits.append(c)
-
-            local_hits = local_hits[:20]
-
-            for c in local_hits:
-                cid = c.get('id') or c.get('title')
-                if cid not in seen_course_ids:
-                    seen_course_ids.add(cid)
-                    courses.append({
-                        "title":    _to_str(c.get('title')),
-                        "link":     _to_str(c.get('link') or c.get('url')) or '#',
-                        "provider": _to_str(c.get('provider')),
-                        "skill":    skill,
-                    })
-                    if len(courses) >= 6:
-                        break
-
-            if not local_hits:
-                try:
-                    res = self.supabase.table('courses').select("*") \
-                        .ilike('title', f'%{skill}%').limit(3).execute()
-                    db_courses = res.data or []
-                    if not db_courses:
-                        res2 = self.supabase.table('courses').select("*") \
-                            .ilike('field', f'%{skill}%').limit(3).execute()
-                        db_courses = res2.data or []
-                    for c in db_courses:
+            for skill in missing[:3]:
+                skill_tokens = set(skill.lower().split())
+                
+                # Check cache first
+                for c in self.courses_data:
+                    blob = f"{c.get('title')} {c.get('skills')} {c.get('field')}".lower()
+                    blob_tokens = set(blob.split())
+                    
+                    if skill_tokens & blob_tokens:
                         cid = c.get('id') or c.get('title')
-                        if cid not in seen_course_ids:
-                            seen_course_ids.add(cid)
-                            courses.append({
-                                "title":    _to_str(c.get('title')),
-                                "link":     _to_str(c.get('link') or c.get('url')) or '#',
+                        if cid not in seen_ids:
+                            seen_ids.add(cid)
+                            matched_courses.append({
+                                "title": _to_str(c.get('title')),
+                                "link": _to_str(c.get('link') or c.get('url')) or '#',
                                 "provider": _to_str(c.get('provider')),
-                                "skill":    skill,
+                                "skill": skill
                             })
-                            if len(courses) >= 6:
-                                break
-                except Exception as e:
-                    print(f"⚠️ Course fetch error for '{skill}': {e}")
+                    if len(matched_courses) >= 6: break
 
-            if len(courses) >= 6:
-                break
+                # DB fallback if cache is empty for this skill
+                if len(matched_courses) < 3:
+                    try:
+                        res = self.supabase.table('courses').select("*").ilike('title', f'%{skill}%').limit(3).execute()
+                        for c in (res.data or []):
+                            cid = c.get('id') or c.get('title')
+                            if cid not in seen_ids:
+                                seen_ids.add(cid)
+                                matched_courses.append({
+                                    "title": _to_str(c.get('title')),
+                                    "link": _to_str(c.get('link') or c.get('url')) or '#',
+                                    "provider": _to_str(c.get('provider')),
+                                    "skill": skill
+                                })
+                    except: pass
 
-        results.append({
-            "job":              _to_str(job.get('title')),
-            "industry":         _to_str(job.get('industry')),
-            "url":              _to_str(job.get('link')) or '#',
-            "match_confidence": round(job['score'] * 100, 2),
-            "missing_skills":   missing[:6],
-            "courses":          courses[:6],
-        })
+            results.append({
+                "job": _to_str(job.get('title')),
+                "industry": _to_str(job.get('industry')),
+                "url": _to_str(job.get('link')) or '#',
+                "match_confidence": round(job['score'] * 100, 2),
+                "missing_skills": missing[:6],
+                "courses": matched_courses[:6],
+            })
 
-    return results
+        return results
