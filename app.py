@@ -10,7 +10,6 @@ import os
 import spacy
 from core.shared_utils import nlp
 
-nlp = spacy.load("en_core_web_sm")
 
 load_dotenv()
 
